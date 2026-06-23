@@ -1,0 +1,8 @@
+# Common dependencies for all three TFT Analysis System modules.
+# Unpinned so pip installs prebuilt wheels matching your Python version
+# (avoids slow/failing source builds on newer Pythons such as 3.14).
+PyQt6
+pandas
+numpy
+matplotlib
+xlrd

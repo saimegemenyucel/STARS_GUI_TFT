@@ -1,0 +1,8 @@
+table,column,references_table,references_column
+iv_points,run_id,iv_runs,run_id
+iv_runs,sweep_id,iv_sweeps,sweep_id
+iv_sweeps,wafer_id,wafers,wafer_id
+recipe_steps,recipe_id,recipes,recipe_id
+tft_curve_features,sweep_id,iv_sweeps,sweep_id
+tft_measurements,wafer_id,wafers,wafer_id
+yield_metrics,wafer_id,wafers,wafer_id
