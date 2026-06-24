@@ -49,6 +49,33 @@ def _empty_recipe() -> Recipe:
     return Recipe(recipe_name="", substrate_type="glass", target_process_node="")
 
 
+class _StepTable(QTableWidget):
+    """Process-step table supporting drag-and-drop row reordering.
+
+    QTableWidget's built-in InternalMove drag-drop only relocates cell
+    *items* and is unreliable across Qt versions for whole-row moves.
+    Overriding dropEvent to compute the source/destination row ourselves and
+    delegate to a callback keeps ``Recipe.steps`` as the single source of
+    truth -- Qt only supplies the drag affordance and drop-indicator line.
+    """
+
+    def __init__(self, rows: int, cols: int, on_row_moved, parent=None):
+        super().__init__(rows, cols, parent)
+        self._on_row_moved = on_row_moved
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDragEnabled(True)
+        self.setDropIndicatorShown(True)
+
+    def dropEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        src_row = self.currentRow()
+        target = self.indexAt(event.position().toPoint())
+        dst_row = target.row() if target.isValid() else self.rowCount() - 1
+        event.accept()
+        if src_row >= 0 and dst_row >= 0 and src_row != dst_row:
+            self._on_row_moved(src_row, dst_row)
+
+
 class MainWindow(QMainWindow):
     """Recipe editor window."""
 
@@ -70,6 +97,7 @@ class MainWindow(QMainWindow):
         self.recipe_panel.new_requested.connect(self.new_recipe)
         self.recipe_panel.load_requested.connect(self.load_recipe)
         self.recipe_panel.delete_requested.connect(self.delete_recipe)
+        self.recipe_panel.duplicate_requested.connect(self.duplicate_recipe)
 
         # Header summary + edit button.
         self.header_label = QLabel()
@@ -82,8 +110,8 @@ class MainWindow(QMainWindow):
         hb.addWidget(self.header_label)
         hb.addWidget(edit_info_btn)
 
-        # Step table.
-        self.table = QTableWidget(0, len(_STEP_HEADERS))
+        # Step table. Rows can be dragged to reorder (see _StepTable).
+        self.table = _StepTable(0, len(_STEP_HEADERS), self._on_step_row_moved)
         self.table.setHorizontalHeaderLabels(_STEP_HEADERS)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -179,6 +207,27 @@ class MainWindow(QMainWindow):
         self._refresh_all()
         self.statusBar().showMessage(f"Loaded '{recipe.recipe_name}'.")
 
+    def duplicate_recipe(self, recipe_id: int) -> None:
+        """Load a copy of a saved recipe into the editor as a new unsaved draft."""
+        recipe = self.container.main_service.load_recipe(recipe_id)
+        if recipe is None:
+            QMessageBox.warning(self, "Duplicate", "Recipe not found.")
+            return
+        draft = deepcopy(recipe)
+        draft.recipe_id = None
+        base_name = draft.recipe_name
+        candidate = f"{base_name} (copy)"
+        n = 2
+        while self.container.main_service.name_exists(candidate):
+            candidate = f"{base_name} (copy {n})"
+            n += 1
+        draft.recipe_name = candidate
+        self._recipe = draft
+        self._refresh_all()
+        self.statusBar().showMessage(
+            f"Duplicated '{base_name}' as '{candidate}' (unsaved — click Save Recipe to keep it)."
+        )
+
     def delete_recipe(self, recipe_id: int) -> None:
         """Delete a saved recipe after confirmation."""
         reply = QMessageBox.question(
@@ -244,6 +293,15 @@ class MainWindow(QMainWindow):
         steps[row], steps[new_row] = steps[new_row], steps[row]
         self._after_change("Step reordered.")
         self.table.selectRow(new_row)
+
+    def _on_step_row_moved(self, src_row: int, dst_row: int) -> None:
+        """Handle a drag-and-drop row reorder from the step table."""
+        steps = self._recipe.steps
+        if not (0 <= src_row < len(steps)) or not (0 <= dst_row < len(steps)):
+            return
+        steps.insert(dst_row, steps.pop(src_row))
+        self._after_change("Step reordered (drag).")
+        self.table.selectRow(dst_row)
 
     # -- presentation -------------------------------------------------------
     def _after_change(self, message: str) -> None:

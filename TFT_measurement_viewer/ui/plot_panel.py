@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -26,6 +27,9 @@ logger = logging.getLogger(__name__)
 class PlotPanel(QWidget):
     """A figure canvas with selectors for plot mode and parameters."""
 
+    # Emitted with a device_id when the user clicks a point/bar identifying one.
+    deviceActivated = pyqtSignal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._df: pd.DataFrame = pd.DataFrame()
@@ -39,6 +43,7 @@ class PlotPanel(QWidget):
         self._hover_pts: list = []
         self._hover_kind = None
         self.canvas.mpl_connect("motion_notify_event", self._on_hover)
+        self.canvas.mpl_connect("button_press_event", self._on_click)
 
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(config.PLOT_MODES)
@@ -170,40 +175,57 @@ class PlotPanel(QWidget):
                 bbox=dict(boxstyle="round", fc="#2b2d36", ec="#3d8bfd"),
                 color="#e6e6e6", fontsize=8, zorder=20, visible=False)
 
+    def _hit_test(self, event) -> tuple[Optional[int], Optional[tuple[float, float]]]:
+        """Return (index into self._hover_pts, xy) of the point under the
+        cursor, or (None, None) if nothing is close enough."""
+        if not self.figure.axes or not self._hover_pts:
+            return None, None
+        ax = self.figure.axes[0]
+        if event.inaxes is not ax:
+            return None, None
+        xs = np.array([p[0] for p in self._hover_pts])
+        ys = np.array([p[1] for p in self._hover_pts])
+        if self._hover_kind == "scatter":
+            disp = ax.transData.transform(np.column_stack([xs, ys]))
+            d2 = (disp[:, 0] - event.x) ** 2 + (disp[:, 1] - event.y) ** 2
+            i = int(np.argmin(d2))
+            if d2[i] > 14 ** 2:
+                return None, None
+            return i, (xs[i], ys[i])
+        else:  # histogram: nearest parameter value to the cursor x
+            if event.xdata is None:
+                return None, None
+            xlim = ax.get_xlim()
+            tol = abs(xlim[1] - xlim[0]) / 40.0
+            i = int(np.argmin(np.abs(xs - event.xdata)))
+            if abs(xs[i] - event.xdata) > tol:
+                return None, None
+            return i, (event.xdata, event.ydata if event.ydata is not None else 0.0)
+
     def _on_hover(self, event) -> None:
         """Show the device id of the nearest point under the cursor."""
         annot = self._annot
-        if annot is None or not self.figure.axes or not self._hover_pts:
-            return
-        ax = self.figure.axes[0]
-        if event.inaxes is not ax:
-            if annot.get_visible():
-                annot.set_visible(False)
-                self.canvas.draw_idle()
+        if annot is None:
             return
         try:
-            xs = np.array([p[0] for p in self._hover_pts])
-            ys = np.array([p[1] for p in self._hover_pts])
-            if self._hover_kind == "scatter":
-                disp = ax.transData.transform(np.column_stack([xs, ys]))
-                d2 = (disp[:, 0] - event.x) ** 2 + (disp[:, 1] - event.y) ** 2
-                i = int(np.argmin(d2))
-                hit = d2[i] <= 14 ** 2
-                xy = (xs[i], ys[i])
-            else:  # histogram: nearest parameter value to the cursor x
-                if event.xdata is None:
-                    return
-                xlim = ax.get_xlim()
-                tol = abs(xlim[1] - xlim[0]) / 40.0
-                i = int(np.argmin(np.abs(xs - event.xdata)))
-                hit = abs(xs[i] - event.xdata) <= tol
-                xy = (event.xdata, event.ydata if event.ydata is not None else 0.0)
-            if hit:
-                annot.xy = xy
-                annot.set_text(self._hover_pts[i][2])
-                annot.set_visible(True)
-            else:
-                annot.set_visible(False)
+            i, xy = self._hit_test(event)
+            if i is None:
+                if annot.get_visible():
+                    annot.set_visible(False)
+                    self.canvas.draw_idle()
+                return
+            annot.xy = xy
+            annot.set_text(self._hover_pts[i][2])
+            annot.set_visible(True)
             self.canvas.draw_idle()
         except Exception:  # pragma: no cover - never let hover crash the UI
+            pass
+
+    def _on_click(self, event) -> None:
+        """Emit deviceActivated for the point the user clicked on, if any."""
+        try:
+            i, _xy = self._hit_test(event)
+            if i is not None:
+                self.deviceActivated.emit(self._hover_pts[i][2])
+        except Exception:  # pragma: no cover - never let a click crash the UI
             pass

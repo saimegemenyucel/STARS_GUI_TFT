@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import QApplication
 from TFT_measurement_viewer.bootstrap import config
 from TFT_measurement_viewer.ui.main_window import MainWindow
 from shared import init_database
+from shared.logging_setup import configure_logging
 from shared.style import DARK_STYLESHEET
 
 logger = logging.getLogger(__name__)
@@ -21,9 +22,7 @@ def run() -> int:
     Returns:
         The Qt application exit code.
     """
-    logging.basicConfig(
-        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
-    )
+    configure_logging("tft_measurement_viewer")
 
     # Make sure the shared database exists before the UI queries it.
     init_database()

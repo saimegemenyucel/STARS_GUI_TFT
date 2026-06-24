@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QKeySequence
@@ -38,6 +37,7 @@ from TFT_measurement_viewer.ui.db_browser_panel import DatabaseBrowserPanel
 from shared.parameters import PARAMETERS
 from shared.db import get_connection
 from shared.iv_ingest import ingest_file
+from shared.tft_analysis import load_output_from_db, load_transfer_from_db
 from shared import wafer_map
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,7 @@ class MainWindow(QMainWindow):
 
         # Full (unfiltered) measurement set for the selected wafer.
         self._all_measurements: pd.DataFrame = pd.DataFrame()
+        self._current_wafer_id: str | None = None
 
         self._build_ui()
         self._build_menu()
@@ -105,8 +106,19 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(wafer_box, stretch=2)
         left_layout.addWidget(filter_box, stretch=1)
 
-        # Centre: measurement table.
+        # Centre: measurement table + jump-to-curve-analysis button.
         self.table = MeasurementTable()
+        self.table.doubleClicked.connect(self._on_table_row_activated)
+        self.view_curve_btn = QPushButton("View Curve Analysis →")
+        self.view_curve_btn.setToolTip(
+            "Show the selected transistor's raw I-V curves in the Curve "
+            "Analysis tab (or double-click a row / click a point on the map).")
+        self.view_curve_btn.clicked.connect(self._on_view_curve_clicked)
+        table_box = QWidget()
+        table_layout = QVBoxLayout(table_box)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        table_layout.addWidget(self.table, stretch=1)
+        table_layout.addWidget(self.view_curve_btn)
 
         # Right: metadata + plots.
         self.meta_label = QLabel("No wafer selected.")
@@ -117,6 +129,7 @@ class MainWindow(QMainWindow):
         meta_layout.addWidget(self.meta_label)
 
         self.plot_panel = PlotPanel()
+        self.plot_panel.deviceActivated.connect(self._open_curve_analysis_for_device)
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.addWidget(meta_box)
@@ -124,7 +137,7 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left)
-        splitter.addWidget(self.table)
+        splitter.addWidget(table_box)
         splitter.addWidget(right)
         splitter.setSizes([260, 560, 460])
 
@@ -201,6 +214,7 @@ class MainWindow(QMainWindow):
         if current is None:
             return
         wafer_id = current.data(Qt.ItemDataRole.UserRole)
+        self._current_wafer_id = wafer_id
         try:
             self._all_measurements = self._load_wafer_cells(wafer_id)
         except Exception as exc:  # pragma: no cover - defensive UI guard
@@ -225,33 +239,7 @@ class MainWindow(QMainWindow):
             cells = wafer_map.get_cells(conn, wafer_id=wafer_id)
         finally:
             conn.close()
-        if cells is None or cells.empty:
-            return pd.DataFrame()
-
-        dc = cells["die_col"].astype(int).astype(str)
-        dr = cells["die_row"].astype(int).astype(str)
-        tc = cells["tr_col"].astype(int).astype(str)
-        tr = cells["tr_row"].astype(int).astype(str)
-        onoff = pd.to_numeric(cells["on_off_ratio"], errors="coerce")
-
-        df = pd.DataFrame()
-        df["device_id"] = "C" + dc + "R" + dr + " c" + tc + "r" + tr
-        df["material"] = cells["material_stack"]
-        # On-wafer coordinates for the Spatial Map (dies on an integer grid,
-        # transistors offset within their die). Hidden from the table via
-        # MeasurementTable.HIDDEN_COLUMNS, but kept so the spatial plot works.
-        df["position_x"] = cells["die_col"].astype(float) + cells["tr_col"].astype(float) * 0.08
-        df["position_y"] = cells["die_row"].astype(float) + cells["tr_row"].astype(float) * 0.08
-        df["vth"] = pd.to_numeric(cells["vth"], errors="coerce")
-        df["mobility"] = pd.to_numeric(cells["mu_sat"], errors="coerce")
-        df["on_off_ratio"] = np.log10(onoff.where(onoff > 0))   # store as log10
-        df["subthreshold_swing"] = pd.to_numeric(cells["ss_min"], errors="coerce")
-        df["max_drain_current"] = np.nan
-        df["leakage_current"] = np.nan
-        df["is_functional"] = cells["functional"].astype("boolean")
-        df["defect_type"] = None
-        df["sweeps"] = cells["sweep_types"]   # kept at the far right of the table
-        return df
+        return wafer_map.cells_to_measurement_df(cells)
 
     def _apply_filters(self) -> None:
         """Filter the in-memory measurement set and refresh table + plots."""
@@ -360,3 +348,57 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Exported {len(df)} rows to {path}")
         except OSError as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
+
+    # -- jump to Curve Analysis for one transistor ---------------------------
+    def _on_table_row_activated(self, index) -> None:
+        """Double-clicking a table row opens that device in Curve Analysis."""
+        device_id = self.table.device_id_at(index)
+        if device_id:
+            self._open_curve_analysis_for_device(device_id)
+
+    def _on_view_curve_clicked(self) -> None:
+        """The 'View Curve Analysis' button uses the currently selected row."""
+        device_id = self.table.current_device_id()
+        if device_id:
+            self._open_curve_analysis_for_device(device_id)
+        else:
+            QMessageBox.information(self, "View Curve Analysis",
+                                     "Select a transistor in the table first.")
+
+    def _open_curve_analysis_for_device(self, device_id: str) -> None:
+        """Reload a device's raw sweeps from the DB and show them in Curve Analysis.
+
+        ``device_id`` looks like ``"C2R3 c1r1"`` (die token + transistor
+        token); both come straight from ``iv_sweeps`` so no original Excel
+        file is needed to redisplay the curve.
+        """
+        if not self._current_wafer_id:
+            return
+        parts = device_id.split(" ", 1)
+        if len(parts) != 2:
+            return
+        die_tok, sub_tok = parts
+        conn = get_connection()
+        try:
+            sweep_ids = wafer_map.sweep_ids_for_device(
+                conn, self._current_wafer_id, die_tok, sub_tok)
+            transfer = (load_transfer_from_db(conn, sweep_ids["IdVg"])
+                        if "IdVg" in sweep_ids else None)
+            outputs = (load_output_from_db(conn, sweep_ids["IdVd"])
+                       if "IdVd" in sweep_ids else None)
+        except Exception as exc:  # pragma: no cover - defensive UI guard
+            logger.exception("Failed to load curves for device %s", device_id)
+            QMessageBox.critical(self, "Database error", str(exc))
+            return
+        finally:
+            conn.close()
+
+        if transfer is None and not outputs:
+            QMessageBox.information(
+                self, "View Curve Analysis",
+                f"No raw Id-Vg/Id-Vd sweep stored for {device_id}.")
+            return
+
+        self.curve_panel.load_from_db(device_id, transfer, outputs)
+        self.tabs.setCurrentWidget(self.curve_panel)
+        self.statusBar().showMessage(f"Showing curves for {device_id}.")

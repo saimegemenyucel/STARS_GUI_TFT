@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 import pandas as pd
-from PyQt6.QtCore import QSortFilterProxyModel, Qt
+from PyQt6.QtCore import QModelIndex, QSortFilterProxyModel, Qt
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QTableView
 
@@ -53,3 +55,17 @@ class MeasurementTable(QTableView):
     def current_dataframe(self) -> pd.DataFrame:
         """Return the DataFrame currently displayed (unsorted source order)."""
         return self._model.dataframe
+
+    def device_id_at(self, proxy_index: QModelIndex) -> Optional[str]:
+        """Return the ``device_id`` for a (possibly sorted) view row, or None."""
+        if not proxy_index.isValid():
+            return None
+        source_row = self._proxy.mapToSource(proxy_index).row()
+        df = self._model.dataframe
+        if "device_id" not in df.columns or not (0 <= source_row < len(df)):
+            return None
+        return str(df.iloc[source_row]["device_id"])
+
+    def current_device_id(self) -> Optional[str]:
+        """Return the ``device_id`` of the currently selected row, or None."""
+        return self.device_id_at(self.currentIndex())

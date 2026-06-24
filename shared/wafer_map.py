@@ -17,6 +17,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -143,6 +144,32 @@ def cell_at(cells: pd.DataFrame, die_col, die_row, tr_col, tr_row) -> Optional[d
     return m.iloc[0].to_dict() if not m.empty else None
 
 
+def sweep_ids_for_device(
+    conn: sqlite3.Connection, wafer_id: str, die_tok: str, sub_tok: str
+) -> dict[str, int]:
+    """Return ``{sweep_type: sweep_id}`` for one (wafer, die, transistor).
+
+    Lets the UI jump from a device shown in the table / spatial map straight
+    to its raw Id-Vg / Id-Vd sweeps (e.g. to reload them in Curve Analysis),
+    without needing the original measurement file.
+
+    Args:
+        conn: An open database connection.
+        wafer_id: The wafer identifier.
+        die_tok: Die position token, e.g. ``"C2R3"``.
+        sub_tok: Transistor position token, e.g. ``"c1r1"``.
+
+    Returns:
+        A mapping of ``sweep_type`` (``"IdVg"`` / ``"IdVd"``) to ``sweep_id``.
+    """
+    rows = conn.execute(
+        "SELECT sweep_type, sweep_id FROM iv_sweeps "
+        "WHERE wafer_id = ? AND die_col_row = ? AND subdie_col_row = ?",
+        (wafer_id, die_tok, sub_tok),
+    ).fetchall()
+    return {r["sweep_type"]: r["sweep_id"] for r in rows if r["sweep_type"]}
+
+
 def list_wafers(conn: sqlite3.Connection) -> list[str]:
     """Distinct wafer ids that have ingested sweeps (plus any in the wafers table)."""
     ids: list[str] = []
@@ -155,6 +182,55 @@ def list_wafers(conn: sqlite3.Connection) -> list[str]:
     except sqlite3.Error:
         pass
     return ids
+
+
+def cells_to_measurement_df(cells: pd.DataFrame) -> pd.DataFrame:
+    """Shape :func:`get_cells` output into the measurement-table column set.
+
+    Both the measurement viewer and the yield analyzer need their per-device
+    DataFrame to look the same -- ``device_id``/``position_x``/``position_y``
+    for the spatial map, plus the parameters :mod:`shared.criteria` checks --
+    even though devices actually live in ``iv_sweeps``/``tft_curve_features``,
+    not the legacy ``tft_measurements`` table. Centralising the shaping here
+    keeps both UIs in sync. NOTE: ``on_off_ratio`` is converted to log10 here
+    to match the convention used by ``quality_criteria.on_off_ratio_min`` (its
+    seeded description is explicitly "log10").
+
+    Args:
+        cells: Output of :func:`get_cells`.
+
+    Returns:
+        DataFrame with ``device_id``, ``material``, ``position_x/y``, ``vth``,
+        ``mobility``, ``on_off_ratio`` (log10), ``subthreshold_swing``,
+        ``max_drain_current``, ``leakage_current``, ``is_functional``,
+        ``defect_type``, ``sweeps``. Empty if ``cells`` is empty.
+    """
+    if cells.empty:
+        return pd.DataFrame()
+
+    dc = cells["die_col"].astype(int).astype(str)
+    dr = cells["die_row"].astype(int).astype(str)
+    tc = cells["tr_col"].astype(int).astype(str)
+    tr = cells["tr_row"].astype(int).astype(str)
+    onoff = pd.to_numeric(cells["on_off_ratio"], errors="coerce")
+
+    df = pd.DataFrame()
+    df["device_id"] = "C" + dc + "R" + dr + " c" + tc + "r" + tr
+    df["material"] = cells["material_stack"]
+    # On-wafer coordinates: dies on an integer grid, transistors offset
+    # within their die so every device gets a distinct spatial-map position.
+    df["position_x"] = cells["die_col"].astype(float) + cells["tr_col"].astype(float) * 0.08
+    df["position_y"] = cells["die_row"].astype(float) + cells["tr_row"].astype(float) * 0.08
+    df["vth"] = pd.to_numeric(cells["vth"], errors="coerce")
+    df["mobility"] = pd.to_numeric(cells["mu_sat"], errors="coerce")
+    df["on_off_ratio"] = np.log10(onoff.where(onoff > 0))
+    df["subthreshold_swing"] = pd.to_numeric(cells["ss_min"], errors="coerce")
+    df["max_drain_current"] = np.nan
+    df["leakage_current"] = np.nan
+    df["is_functional"] = cells["functional"].astype("boolean")
+    df["defect_type"] = None
+    df["sweeps"] = cells["sweep_types"]
+    return df
 
 
 def grid_extent(cells: pd.DataFrame) -> dict[str, int]:

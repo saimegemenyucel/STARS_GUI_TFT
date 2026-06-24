@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import QApplication
 from TFT_recipe_builder.bootstrap import config
 from TFT_recipe_builder.ui.main_window import MainWindow
 from shared import init_database
+from shared.logging_setup import configure_logging
 from shared.style import DARK_STYLESHEET
 
 logger = logging.getLogger(__name__)
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 def run() -> int:
     """Create the QApplication, show the main window and start the event loop."""
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    configure_logging("tft_recipe_builder")
     init_database()
 
     app = QApplication(sys.argv)

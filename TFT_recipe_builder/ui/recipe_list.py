@@ -26,6 +26,7 @@ class RecipeListPanel(QWidget):
     new_requested = pyqtSignal()
     load_requested = pyqtSignal(int)
     delete_requested = pyqtSignal(int)
+    duplicate_requested = pyqtSignal(int)
 
     def __init__(self, service: RecipeService, parent=None):
         super().__init__(parent)
@@ -36,9 +37,11 @@ class RecipeListPanel(QWidget):
 
         self.new_btn = QPushButton("New Recipe")
         self.load_btn = QPushButton("Load Selected")
+        self.duplicate_btn = QPushButton("Duplicate Selected")
         self.delete_btn = QPushButton("Delete Selected")
         self.new_btn.clicked.connect(self.new_requested.emit)
         self.load_btn.clicked.connect(self._emit_load)
+        self.duplicate_btn.clicked.connect(self._emit_duplicate)
         self.delete_btn.clicked.connect(self._emit_delete)
 
         box = QGroupBox("Saved recipes")
@@ -46,6 +49,7 @@ class RecipeListPanel(QWidget):
         inner.addWidget(self.list_widget)
         inner.addWidget(self.new_btn)
         inner.addWidget(self.load_btn)
+        inner.addWidget(self.duplicate_btn)
         inner.addWidget(self.delete_btn)
 
         layout = QVBoxLayout(self)
@@ -76,3 +80,8 @@ class RecipeListPanel(QWidget):
         rid = self._current_id()
         if rid is not None:
             self.delete_requested.emit(rid)
+
+    def _emit_duplicate(self) -> None:
+        rid = self._current_id()
+        if rid is not None:
+            self.duplicate_requested.emit(rid)

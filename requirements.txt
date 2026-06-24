@@ -4,5 +4,7 @@
 PyQt6
 pandas
 numpy
+scipy
 matplotlib
 xlrd
+openpyxl

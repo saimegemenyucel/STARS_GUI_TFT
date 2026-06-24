@@ -183,7 +183,15 @@ class MainWindow(QMainWindow):
         self.save_btn.setEnabled(False)
         self._current_metrics = None
         try:
-            self._current_df = db_ops.load_measurements(self._current_wafer)
+            # Devices live in iv_sweeps/tft_curve_features (populated by the
+            # I-V ingest pipeline / "Load wafer folder..."), not the legacy
+            # tft_measurements table -- same source the Wafer Map tab uses.
+            conn = get_connection()
+            try:
+                cells = wafer_map.get_cells(conn, wafer_id=self._current_wafer)
+            finally:
+                conn.close()
+            self._current_df = wafer_map.cells_to_measurement_df(cells)
             self.history_model.set_dataframe(
                 db_ops.load_metric_history(self._current_wafer)
             )

@@ -7,11 +7,17 @@ count passes) need the same rules, so they live here in the shared layer.
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _has_value(x) -> bool:
+    """True if ``x`` is a real, non-NaN value (NaN means "not measured")."""
+    return x is not None and not (isinstance(x, float) and math.isnan(x))
 
 
 @dataclass(frozen=True)
@@ -76,26 +82,26 @@ def evaluate_device(measurement: dict, criteria: QualityCriteria) -> tuple[bool,
     checks: dict[str, bool] = {}
 
     vth = measurement.get("vth")
-    if vth is not None:
+    if _has_value(vth):
         if criteria.vth_min is not None:
             checks["vth_min"] = vth >= criteria.vth_min
         if criteria.vth_max is not None:
             checks["vth_max"] = vth <= criteria.vth_max
 
     mobility = measurement.get("mobility")
-    if mobility is not None and criteria.mobility_min is not None:
+    if _has_value(mobility) and criteria.mobility_min is not None:
         checks["mobility_min"] = mobility >= criteria.mobility_min
 
     on_off = measurement.get("on_off_ratio")
-    if on_off is not None and criteria.on_off_ratio_min is not None:
+    if _has_value(on_off) and criteria.on_off_ratio_min is not None:
         checks["on_off_ratio_min"] = on_off >= criteria.on_off_ratio_min
 
     ss = measurement.get("subthreshold_swing")
-    if ss is not None and criteria.subthreshold_swing_max is not None:
+    if _has_value(ss) and criteria.subthreshold_swing_max is not None:
         checks["subthreshold_swing_max"] = ss <= criteria.subthreshold_swing_max
 
     leak = measurement.get("leakage_current")
-    if leak is not None and criteria.leakage_current_max is not None:
+    if _has_value(leak) and criteria.leakage_current_max is not None:
         checks["leakage_current_max"] = leak <= criteria.leakage_current_max
 
     is_functional = all(checks.values()) if checks else bool(measurement.get("is_functional"))

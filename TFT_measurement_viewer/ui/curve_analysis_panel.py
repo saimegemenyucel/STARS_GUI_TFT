@@ -12,9 +12,12 @@ import logging
 import re
 from pathlib import Path
 
+import math
+
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
@@ -32,12 +35,15 @@ from PyQt6.QtWidgets import (
 )
 
 from shared.tft_analysis import (
+    OutputCurve,
+    TransferCurve,
     extract_output_features,
     extract_transfer_features,
     load_output,
     load_transfer,
 )
 from shared.tft_plots import draw_full_analysis
+from shared.device_quality import DeviceStatus, classify_device
 from shared.db import get_connection
 from shared.iv_ingest import ingest_file
 from shared.iv_features import save_transfer_features
@@ -55,6 +61,7 @@ class CurveAnalysisPanel(QWidget):
         super().__init__(parent)
         self._transfer = None        # TransferCurve
         self._transfer_feat = None   # TransferFeatures
+        self._quality = None         # DeviceQualityResult
         self._outputs = None         # list[OutputCurve]
         self._transfer_path = None
         self._outputs_path = None
@@ -228,6 +235,28 @@ class CurveAnalysisPanel(QWidget):
         self._maybe_parse_geometry(path)
         self._reextract()
 
+    def load_from_db(
+        self,
+        device_label: str,
+        transfer: TransferCurve | None,
+        outputs: list[OutputCurve] | None,
+    ) -> None:
+        """Display curves reconstructed from already-ingested DB points.
+
+        Used when a device is opened from the Measurements table / spatial
+        map: no original Excel file is needed since the raw points were
+        already stored at ingest time.
+        """
+        self._transfer = transfer
+        self._outputs = outputs
+        self._transfer_path = None
+        self._outputs_path = None
+        self.idvg_label.setText(f"{device_label} (from database)" if transfer
+                                 else "— no transfer sweep in database —")
+        self.idvd_label.setText(f"{device_label} (from database)" if outputs
+                                 else "— no output sweep in database —")
+        self._reextract()
+
     def _maybe_parse_geometry(self, path: str) -> None:
         """Auto-fill W/L from an ``L<#>W<#>`` token in the filename, if present."""
         m = re.search(r"[Ll](\d+(?:\.\d+)?)[Ww](\d+(?:\.\d+)?)", Path(path).name)
@@ -283,12 +312,17 @@ class CurveAnalysisPanel(QWidget):
     # -- analysis -----------------------------------------------------------
     def _reextract(self) -> None:
         """Re-run feature extraction with the current W/L/tox/εr and refresh."""
+        self._quality = None
         if self._transfer is not None:
             try:
+                w_um, l_um = self.w_spin.value(), self.l_spin.value()
                 self._transfer_feat = extract_transfer_features(
-                    self._transfer, self.w_spin.value(), self.l_spin.value(),
+                    self._transfer, w_um, l_um,
                     self.tox_spin.value(), self.eps_spin.value(),
                 )
+                device_id = (Path(self._transfer_path).stem
+                             if self._transfer_path else "current device")
+                self._quality = classify_device(device_id, self._transfer_feat, w_um, l_um)
             except Exception:  # pragma: no cover - defensive UI guard
                 logger.exception("Transfer extraction failed")
                 self._transfer_feat = None
@@ -299,36 +333,67 @@ class CurveAnalysisPanel(QWidget):
         draw_full_analysis(self.figure, self._transfer, self._transfer_feat, self._outputs)
         self.canvas.draw_idle()
 
+    @staticmethod
+    def _fmt(value: float, spec: str) -> str:
+        """Format a number, or "N/A" for NaN (e.g. a rejected fit)."""
+        return "N/A" if value is None or not math.isfinite(value) else format(value, spec)
+
     def _fill_table(self) -> None:
         rows: list[tuple[str, str, str]] = []
+        banner: tuple[str, QColor] | None = None
         tf = self._transfer_feat
+        q = self._quality
         if tf is not None:
+            if q is not None and q.status is DeviceStatus.FAIL:
+                banner = (q.reason_text, QColor("#d62728"))
+            elif q is not None and q.status is DeviceStatus.WARNING:
+                banner = (q.reason_text, QColor("#e0a000"))
+            # Fit-derived params: use the (possibly N/A-blanked-on-FAIL)
+            # classification result, not the raw extraction, so a FAILED
+            # device can't show a misleading number here. Raw measured
+            # params (Ion, Ioff, on/off, leakage) always come from the
+            # extraction directly -- classify_device never blanks those.
+            vth_sat, ss_min, mu_sat = (
+                (q.vth_sat, q.ss_min, q.mu_sat) if q is not None
+                else (tf.vth_sat, tf.ss_min, tf.mu_sat)
+            )
             rows += [
-                ("Threshold voltage Vth", f"{tf.vth_sat:.3f}", "V"),
-                ("Subthreshold swing SS", f"{tf.ss_min:.1f}", "mV/dec"),
-                ("On/Off ratio", f"{tf.on_off_ratio:.2e}", "—"),
-                ("Ion (max |Id|)", f"{tf.ion:.3e}", "A"),
-                ("Ioff (min |Id|)", f"{tf.ioff:.3e}", "A"),
-                ("Peak transconductance gm", f"{tf.gm_max:.3e}", "S"),
-                ("gm peak @ Vg", f"{tf.gm_max_vg:.2f}", "V"),
-                ("Saturation mobility μ_sat", f"{tf.mu_sat:.2f}", "cm²/Vs"),
-                ("Vth (transition, Zhou)", f"{tf.vth_transition:.3f}", "V"),
-                ("μ_AVG peak (linear, Zhou)", f"{tf.mu_avg_peak:.2f}", "cm²/Vs"),
-                ("Gate leakage (max |Ig|)", f"{tf.gate_leakage_max:.2e}", "A"),
-                ("Cox", f"{tf.cox:.3e}", "F/cm²"),
+                ("Threshold voltage Vth", self._fmt(vth_sat, ".3f"), "V"),
+                ("Subthreshold swing SS", self._fmt(ss_min, ".1f"), "mV/dec"),
+                ("On/Off ratio", self._fmt(tf.on_off_ratio, ".2e"), "—"),
+                ("Ion (max |Id|)", self._fmt(tf.ion, ".3e"), "A"),
+                ("Ioff (min |Id|)", self._fmt(tf.ioff, ".3e"), "A"),
+                ("Peak transconductance gm", self._fmt(tf.gm_max, ".3e"), "S"),
+                ("gm peak @ Vg", self._fmt(tf.gm_max_vg, ".2f"), "V"),
+                ("Saturation mobility μ_sat", self._fmt(mu_sat, ".2f"), "cm²/Vs"),
+                ("sqrt(Id) fit R²", self._fmt(tf.sqrt_fit_r2, ".3f"), "—"),
+                ("Vth (transition, Zhou)", self._fmt(tf.vth_transition, ".3f"), "V"),
+                ("μ_AVG peak (linear, Zhou)", self._fmt(tf.mu_avg_peak, ".2f"), "cm²/Vs"),
+                ("Gate leakage (max |Ig|)", self._fmt(tf.gate_leakage_max, ".2e"), "A"),
+                ("Cox", self._fmt(tf.cox, ".3e"), "F/cm²"),
             ]
         if self._outputs:
             for oc in self._outputs:
                 of = extract_output_features(oc)
-                rows.append((f"Idsat @ Vg={of.gate_v:+.1f} V", f"{of.idsat:.3e}", "A"))
-                rows.append((f"Ron @ Vg={of.gate_v:+.1f} V", f"{of.ron:.3e}", "Ω"))
-                rows.append((f"gd @ Vg={of.gate_v:+.1f} V", f"{of.gd:.3e}", "S"))
+                rows.append((f"Idsat @ Vg={of.gate_v:+.1f} V", self._fmt(of.idsat, ".3e"), "A"))
+                rows.append((f"Ron @ Vg={of.gate_v:+.1f} V", self._fmt(of.ron, ".3e"), "Ω"))
+                rows.append((f"gd @ Vg={of.gate_v:+.1f} V", self._fmt(of.gd, ".3e"), "S"))
 
-        self.table.setRowCount(len(rows))
+        self.table.clearSpans()  # a banner row's 3-column span must not leak onto later rows
+        offset = 1 if banner else 0
+        self.table.setRowCount(len(rows) + offset)
+        if banner:
+            text, color = banner
+            item = QTableWidgetItem(text)
+            item.setForeground(color)
+            font = item.font(); font.setBold(True); item.setFont(font)
+            self.table.setItem(0, 0, item)
+            self.table.setSpan(0, 0, 1, 3)
         for r, (name, val, unit) in enumerate(rows):
-            self.table.setItem(r, 0, QTableWidgetItem(name))
+            row = r + offset
+            self.table.setItem(row, 0, QTableWidgetItem(name))
             item_v = QTableWidgetItem(val)
             item_v.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(r, 1, item_v)
-            self.table.setItem(r, 2, QTableWidgetItem(unit))
+            self.table.setItem(row, 1, item_v)
+            self.table.setItem(row, 2, QTableWidgetItem(unit))
         self.table.resizeColumnsToContents()

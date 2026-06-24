@@ -1,0 +1,8 @@
+[project]
+name = "stars-gui-tft"
+version = "1.0.0"
+description = "PyQt6 suite for Thin-Film-Transistor (TFT) wafer characterization, yield analysis, and recipe management."
+requires-python = ">=3.9"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

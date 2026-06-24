@@ -14,7 +14,7 @@ import logging
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -26,12 +26,14 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
 from TFT_recipe_builder.logic.device_model import (
     MATERIAL_COLORS,
+    TOPOLOGIES,
     DeviceStructure,
     Layer,
     default_igzo_device,
@@ -98,6 +100,14 @@ class DeviceStructurePanel(QWidget):
 
     # -- construction -------------------------------------------------------
     def _build_ui(self) -> None:
+        topo_box = QGroupBox("Topology")
+        topo_layout = QVBoxLayout(topo_box)
+        self.topology_combo = QComboBox()
+        for key, text in TOPOLOGIES.items():
+            self.topology_combo.addItem(text, userData=key)
+        self.topology_combo.currentIndexChanged.connect(self._on_change)
+        topo_layout.addWidget(self.topology_combo)
+
         layer_box = QGroupBox("Layers (material & thickness)")
         layer_form = QFormLayout(layer_box)
         for attr, label in _LAYER_FIELDS:
@@ -123,7 +133,7 @@ class DeviceStructurePanel(QWidget):
             rl = QHBoxLayout(row)
             rl.setContentsMargins(0, 0, 0, 0)
             rl.addWidget(combo, stretch=2)
-            rl.addWidget(spin, stretch=1)
+            rl.addWidget(PlusMinusSpin(spin, flat=True), stretch=1)
             layer_form.addRow(label + ":", row)
 
         geom_box = QGroupBox("Geometry")
@@ -138,7 +148,7 @@ class DeviceStructurePanel(QWidget):
             spin.setMaximumWidth(90)
             spin.valueChanged.connect(self._on_change)
             self._geom_spins[attr] = spin
-            geom_form.addRow(label + ":", PlusMinusSpin(spin))
+            geom_form.addRow(label + ":", PlusMinusSpin(spin, flat=True))
 
         defaults_btn = QPushButton("Load IGZO Defaults")
         defaults_btn.clicked.connect(self.load_defaults)
@@ -155,6 +165,7 @@ class DeviceStructurePanel(QWidget):
         controls = QWidget()
         cl = QVBoxLayout(controls)
         cl.addWidget(QLabel("<b>TFT device structure</b>"))
+        cl.addWidget(topo_box)
         cl.addWidget(layer_box)
         cl.addWidget(geom_box)
         cl.addLayout(btn_row)
@@ -163,17 +174,30 @@ class DeviceStructurePanel(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(controls)
-        scroll.setMinimumWidth(320)
-        scroll.setMaximumWidth(420)
+        # The dark theme's 18px font + padding makes the layer/geometry rows
+        # want ~490px (form labels + material combo + thickness spin, or
+        # the -/+ flanked geometry spin); a 420px cap forced a horizontal
+        # scrollbar that clipped the action buttons. Widened, and the fixed
+        # HBoxLayout is now a splitter so the user can drag for more room
+        # on any font/DPI setting instead of being stuck with a fixed split.
+        scroll.setMinimumWidth(360)
+        scroll.setMaximumWidth(560)
 
         plot_side = QWidget()
         pl = QVBoxLayout(plot_side)
         pl.addWidget(self.toolbar)
         pl.addWidget(self.canvas, stretch=1)
 
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(scroll)
+        splitter.addWidget(plot_side)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([500, 900])
+
         layout = QHBoxLayout(self)
-        layout.addWidget(scroll)
-        layout.addWidget(plot_side, stretch=1)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(splitter)
 
     # -- state <-> widgets --------------------------------------------------
     def _load_from_device(self, device: DeviceStructure) -> None:
@@ -181,6 +205,8 @@ class DeviceStructurePanel(QWidget):
         was_updating = self._updating
         self._updating = True
         try:
+            idx = self.topology_combo.findData(device.topology)
+            self.topology_combo.setCurrentIndex(idx if idx >= 0 else 0)
             for attr, _label in _LAYER_FIELDS:
                 layer: Layer = getattr(device, attr)
                 self._material_combos[attr].setCurrentText(layer.material)
@@ -193,6 +219,7 @@ class DeviceStructurePanel(QWidget):
     def _build_device_from_widgets(self) -> DeviceStructure:
         """Update the device to reflect the current widget values."""
         device = self._device
+        device.topology = self.topology_combo.currentData() or device.topology
         for attr, _label in _LAYER_FIELDS:
             layer: Layer = getattr(device, attr)
             text = self._material_combos[attr].currentText().strip()

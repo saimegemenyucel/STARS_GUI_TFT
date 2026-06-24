@@ -1,0 +1,31 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# SQLite databases (generated locally; not source)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Rotating application logs
+logs/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Packaging
+*.egg-info/
+dist/
+build/

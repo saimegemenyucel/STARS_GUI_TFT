@@ -11,6 +11,7 @@ from shared.tft_analysis import (
     OutputCurve,
     TransferCurve,
     TransferFeatures,
+    smoothed_derivative,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,7 +86,7 @@ def _draw_sqrt(ax, tc: TransferCurve, tf: TransferFeatures) -> None:
 
 
 def _draw_gm(ax, tc: TransferCurve, tf: TransferFeatures) -> None:
-    gm = np.gradient(tc.drain_i.astype(float), tc.gate_v.astype(float))
+    gm = smoothed_derivative(tc.drain_i.astype(float), tc.gate_v.astype(float))
     ax.plot(tc.gate_v, np.abs(gm), "o-", color="#9467bd", ms=3)
     ax.plot([tf.gm_max_vg], [tf.gm_max], "v", color=_RED,
             label=f"gm_max={tf.gm_max:.2e} S")
@@ -97,12 +98,16 @@ def _draw_gm(ax, tc: TransferCurve, tf: TransferFeatures) -> None:
 
 
 def _draw_output(ax, outputs: list[OutputCurve]) -> None:
+    # Signed Id, not |Id|: abs() folds a Vd sweep that crosses zero (or
+    # reverses polarity) into a false V-shape and hides genuine asymmetry
+    # between the positive- and negative-Vd branches (seen on real devices).
     cmap = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
     for i, oc in enumerate(outputs):
-        ax.plot(oc.drain_v, np.abs(oc.drain_i), "-", color=cmap[i % len(cmap)],
+        ax.plot(oc.drain_v, oc.drain_i, "-", color=cmap[i % len(cmap)],
                 lw=1.4, label=f"Vg={oc.gate_v:+.1f} V")
+    ax.axhline(0, color="#aaa", lw=0.6)
     ax.set_xlabel("Drain voltage Vd (V)")
-    ax.set_ylabel("|Id| (A)")
+    ax.set_ylabel("Id (A)")
     ax.set_title("Output characteristics")
     ax.legend(fontsize=7)
     ax.grid(True, alpha=0.25)
